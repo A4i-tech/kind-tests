@@ -1,0 +1,4 @@
+.kube/
+.bin/
+logs/
+.mongo-dump-source/

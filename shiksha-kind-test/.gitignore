@@ -1,0 +1,5 @@
+.shiksha-kind-filtered.yaml
+.shiksha-kind-raw.yaml
+.mongo-dump/
+.kubeconfig-kind
+tools/
