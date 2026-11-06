@@ -29,8 +29,10 @@
 #   kubectl      passthrough to kubectl, isolated kubeconfig guaranteed (see cmd_kubectl)
 #   down         delete the kind cluster, clean up local state
 #   all          up + secrets + mongo + rewire-mongo + deploy + status
+#   ci           unattended: up, synthetic secrets, empty mongo, deploy, forward, test, down. Exits non-zero on first failure.
 #
-# Env overrides: SHIKSHA_REPO_DIR, SHIKSHA_BRANCH, SHIKSHA_SECRETS_DIR,
+# CI_MODE=1 uses synthetic secrets and skips the mongo dump when those files are missing.
+# Env overrides: CI_MODE, SHIKSHA_REPO_DIR, SHIKSHA_BRANCH, SHIKSHA_SECRETS_DIR,
 #                MONGO_DUMP_ZIP, MONGO_DB, TEST_PHONE, TEST_PIN
 set -euo pipefail
 
@@ -43,6 +45,7 @@ MONGO_DUMP_ZIP="${MONGO_DUMP_ZIP:-$HOME/shiksha-backend-dump.zip}"
 MONGO_DB="${MONGO_DB:-shiksha-backend}"
 TEST_PHONE="${TEST_PHONE:-9999999999}"
 TEST_PIN="${TEST_PIN:-7476}"
+CI_MODE="${CI_MODE:-}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILTERED="$HERE/.shiksha-kind-filtered.yaml"
@@ -53,6 +56,15 @@ export PATH="$HERE/tools:$PATH"
 # makes uses only this file; ~/.kube/config and its current-context are
 # never read or written, so this can't collide with normal kube-dev work.
 export KUBECONFIG="$HERE/.kubeconfig-kind"
+
+# rollout wait that fails fast: prints pod state and exits 2 on timeout
+wait_ro() {
+  kubectl -n "$NS" rollout status "deploy/$1" --timeout="${2:-90s}" && return 0
+  echo "FAIL: deploy/$1 not ready in ${2:-90s}" >&2
+  kubectl -n "$NS" get pods >&2 || true
+  kubectl -n "$NS" logs "deploy/$1" --tail=15 >&2 || true
+  exit 2
+}
 
 need() { command -v "$1" >/dev/null || { echo "missing: $1" >&2; exit 1; }; }
 
@@ -80,7 +92,7 @@ cmd_up() {
     echo "kind cluster '$CLUSTER' already up — (re)exporting into isolated kubeconfig"
     kind export kubeconfig --name "$CLUSTER"
   else
-    kind create cluster --name "$CLUSTER"
+    kind create cluster --name "$CLUSTER" --wait 120s
   fi
   kubectl config use-context "kind-$CLUSTER"
 }
@@ -91,7 +103,7 @@ filter_manifests() {
   python3 - "$1" "$FILTERED" <<'PY'
 import sys, yaml
 src, dst = sys.argv[1], sys.argv[2]
-skip = {"ExternalSecret", "Certificate", "Ingress"}
+skip = {"ExternalSecret", "Certificate", "Ingress", "Application", "ApplicationSet", "AppProject"}
 with open(src) as f:
     docs = [d for d in yaml.safe_load_all(f) if d and d.get("kind") not in skip]
 with open(dst, "w") as f:
@@ -120,9 +132,9 @@ cmd_deploy() {
   filter_manifests "$HERE/.shiksha-kind-raw.yaml"
   kubectl apply -f "$FILTERED"
   echo "waiting for rollouts (be/api may crashloop until 'mongo'+'rewire-mongo' have run)..."
-  kubectl -n "$NS" rollout status deploy/shiksha-fe --timeout=120s || true
-  kubectl -n "$NS" rollout status deploy/shiksha-be --timeout=60s || true
-  kubectl -n "$NS" rollout status deploy/shiksha-api --timeout=60s || true
+  wait_ro shiksha-fe 120s
+  kubectl -n "$NS" rollout status deploy/shiksha-be --timeout=45s || true
+  kubectl -n "$NS" rollout status deploy/shiksha-api --timeout=45s || true
 }
 
 # clones real-shaped secret blobs from local JSON (SECRETS_DIR) so be/api/fe
@@ -131,6 +143,12 @@ cmd_deploy() {
 cmd_secrets() {
   need python3
   assert_kind_context
+  if [ -n "$CI_MODE" ] && [ ! -f "$SECRETS_DIR/shiksha-be-dev-secret.json" ]; then
+    SECRETS_DIR="$HERE/.ci-secrets"; mkdir -p "$SECRETS_DIR"
+    echo '{"PORT":"3000","JWT_SECRET":"ci","PIN_SECRET_KEY":"ci","MONGO_URL":"mongodb://x","ALLOWED_ORIGINS":"*","BACKEND_URL":"http://shiksha-be-svc"}' > "$SECRETS_DIR/shiksha-be-dev-secret.json"
+    echo '{"PORT":"8000","APP_ENV":"ci"}' > "$SECRETS_DIR/shiksha-api-dev-secret.json"
+    echo "CI_MODE: using synthetic secrets"
+  fi
   kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
   for pair in shiksha-be-secret=shiksha-be-dev-secret shiksha-api-secret=shiksha-api-dev-secret; do
     target="${pair%%=*}"; file="$SECRETS_DIR/${pair#*=}.json"
@@ -162,7 +180,7 @@ cmd_secrets() {
 cmd_mongo() {
   need unzip
   assert_kind_context
-  [ -f "$MONGO_DUMP_ZIP" ] || { echo "dump zip not found: $MONGO_DUMP_ZIP" >&2; exit 1; }
+  [ -f "$MONGO_DUMP_ZIP" ] || [ -n "$CI_MODE" ] || { echo "dump zip not found: $MONGO_DUMP_ZIP" >&2; exit 1; }
   kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
   cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -195,7 +213,8 @@ spec:
   selector: {app: shiksha-mongo}
   ports: [{port: 27017, targetPort: 27017}]
 EOF
-  kubectl -n "$NS" rollout status deploy/shiksha-mongo --timeout=120s
+  wait_ro shiksha-mongo 120s
+  if [ ! -f "$MONGO_DUMP_ZIP" ]; then echo "CI_MODE: no dump, empty mongo"; return 0; fi
 
   rm -rf "$HERE/.mongo-dump" && mkdir -p "$HERE/.mongo-dump"
   # unzip exits 1 for harmless warnings (e.g. backslash path separators) even
@@ -219,7 +238,7 @@ d['data']['MONGO_URL'] = base64.b64encode('$url'.encode()).decode()
 print(json.dumps(d))
 " | kubectl apply -f -
   kubectl -n "$NS" rollout restart deploy/shiksha-be
-  kubectl -n "$NS" rollout status deploy/shiksha-be --timeout=90s
+  wait_ro shiksha-be 90s
 }
 
 cmd_forward() {
@@ -230,21 +249,24 @@ cmd_forward() {
 
 # run in a second shell while `forward` is running in the first
 cmd_test() {
+  local fails=0
   echo "--- fe serves index ---"
-  curl -sf -o /dev/null -w '%{http_code}\n' http://localhost:8000/ || echo "FAIL: fe not reachable"
+  curl -sf --max-time 10 -o /dev/null -w '%{http_code}\n' http://localhost:8000/ || { echo "FAIL: fe not reachable"; fails=$((fails+1)); }
   echo "--- env.js rendered, no leftover \${...} placeholders ---"
-  envjs=$(curl -sf http://localhost:8000/assets/env.js) || { echo "FAIL: env.js not reachable"; envjs=""; }
+  envjs=$(curl -sf --max-time 10 http://localhost:8000/assets/env.js) || { echo "FAIL: env.js not reachable"; envjs=""; fails=$((fails+1)); }
   if echo "$envjs" | grep -q '\${'; then
-    echo "FAIL: unsubstituted \${...} placeholder in env.js"
+    echo "FAIL: unsubstituted \${...} placeholder in env.js"; fails=$((fails+1))
   elif echo "$envjs" | grep -q '"/api"'; then
     echo "OK: env.js rendered (apiUrl=/api)"
   else
-    echo "FAIL: apiUrl not set to /api in env.js"
+    echo "FAIL: apiUrl not set to /api in env.js"; fails=$((fails+1))
   fi
   echo "--- /api/* reaches be through nginx (JSON body = proxied, not fe's SPA index.html fallback) ---"
-  ctype=$(curl -s -D - -o /dev/null http://localhost:8000/api/auth/me | grep -i '^content-type:')
-  echo "$ctype" | grep -qi 'json' \
-    && echo "OK: proxied ($ctype)" || echo "FAIL: not JSON ($ctype) — proxy not firing, fell through to SPA fallback"
+  ctype=$(curl -s --max-time 10 -D - -o /dev/null http://localhost:8000/api/auth/me | grep -i '^content-type:' || true)
+  if echo "$ctype" | grep -qi 'json'; then echo "OK: proxied ($ctype)"
+  else echo "FAIL: not JSON ($ctype), proxy not firing, fell through to SPA fallback"; fails=$((fails+1)); fi
+  [ "$fails" -eq 0 ] || { echo "FAIL: $fails check(s) failed" >&2; return 1; }
+  echo "ALL CHECKS PASSED"
 }
 
 cmd_login_test() {
@@ -275,6 +297,15 @@ cmd_kubectl() {
   kubectl "$@"
 }
 
+cmd_ci() {
+  trap '[ -z "${PF:-}" ] || kill "$PF" 2>/dev/null; cmd_down' EXIT
+  cmd_up; cmd_secrets; cmd_mongo; cmd_deploy; cmd_rewire_mongo
+  kubectl -n "$NS" port-forward svc/shiksha-fe-svc 8000:80 >/dev/null 2>&1 & PF=$!
+  for _ in $(seq 1 15); do curl -sf --max-time 2 -o /dev/null http://localhost:8000/ && break; sleep 1; done
+  cmd_test
+  cmd_status
+}
+
 cmd_down() {
   kind delete cluster --name "$CLUSTER" 2>/dev/null || true
   rm -rf "$HERE/.mongo-dump" "$HERE/.kubeconfig-kind" "$HERE/.shiksha-kind-raw.yaml" "$FILTERED"
@@ -292,6 +323,7 @@ case "${1:-}" in
   status) cmd_status ;;
   kubectl) shift; cmd_kubectl "$@" ;;
   down) cmd_down ;;
+  ci) CI_MODE=1; cmd_ci ;;
   all) cmd_up; cmd_secrets; cmd_mongo; cmd_deploy; cmd_rewire_mongo; cmd_status ;;
-  *) echo "usage: $0 {up|secrets|mongo|rewire-mongo|deploy|forward|test|login-test|status|kubectl|down|all}"; exit 1 ;;
+  *) echo "usage: $0 {ci|up|secrets|mongo|rewire-mongo|deploy|forward|test|login-test|status|kubectl|down|all}"; exit 1 ;;
 esac

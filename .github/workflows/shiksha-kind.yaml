@@ -1,0 +1,28 @@
+name: shiksha-kind
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: infra-ops branch to test
+        default: a4i/main
+  push:
+    branches: [ci/shiksha]
+permissions:
+  contents: read
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: A4i-tech/infra-ops
+          ref: ${{ inputs.branch || 'a4i/main' }}
+          token: ${{ secrets.INFRA_OPS_READ_TOKEN }}
+          path: infra-ops
+      - name: Run shiksha kind test
+        env:
+          SHIKSHA_REPO_DIR: ${{ github.workspace }}/infra-ops
+          SHIKSHA_BRANCH: ${{ inputs.branch || 'a4i/main' }}
+        run: ./shiksha-kind-test/run.sh ci
