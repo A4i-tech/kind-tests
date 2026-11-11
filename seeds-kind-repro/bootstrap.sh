@@ -331,7 +331,7 @@ cmd_check_url() {
 # Same idea as shiksha-kind-test/run.sh: kubectl cp the dump in, mongorestore it.
 cmd_mongo() {
   local dumpdir="$MONGO_DUMP_DIR/$MONGO_DB" pod
-  [[ -d "$dumpdir" ]] || die "dump not found: $dumpdir (set SEEDS_MONGO_DUMP_DIR)"
+  [[ -d "$dumpdir" ]] || echo ">> no dump at $dumpdir, starting an empty mongo"
   kc create namespace "$NS" --dry-run=client -o yaml | kc apply -f -
   echo ">> deploy seeds-mongo  image=mongo:7"
   cat <<YAML | kc apply -f - || die "could not apply seeds-mongo"
@@ -368,6 +368,10 @@ YAML
 
   pod="$(kc -n "$NS" get pod -l app=seeds-mongo -o jsonpath='{.items[0].metadata.name}')"
   [[ -n "$pod" ]] || die "no seeds-mongo pod"
+  if [[ ! -d "$dumpdir" ]]; then
+    echo ">> seeds-mongo ready (empty) at mongodb://seeds-mongo.$NS.svc.cluster.local:27017/$MONGO_DB"
+    return 0
+  fi
   echo ">> copying $dumpdir -> $pod:/tmp/dump ($(du -sh "$dumpdir" | cut -f1))"
   # clear first, else a re-run nests the copy under /tmp/dump/$MONGO_DB
   kc -n "$NS" exec "$pod" -- rm -rf /tmp/dump

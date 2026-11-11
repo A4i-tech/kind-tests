@@ -1,0 +1,69 @@
+name: seeds-kind-e2e
+
+on:
+  push:
+    branches: [ci/seeds]
+  workflow_dispatch:
+    inputs:
+      seeds_ref:
+        description: SEEDS branch to test
+        default: farman/739-website-fetch-audit-logs-bcrypt
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SEEDS_REF: ${{ inputs.seeds_ref || 'farman/739-website-fetch-audit-logs-bcrypt' }}
+      SEEDS_SECRETS_DIR: ${{ runner.temp }}/seeds-secrets
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: A4i-tech/SEEDS
+          ref: ${{ env.SEEDS_REF }}
+          path: seeds-src
+      - name: Synthetic secrets
+        run: |
+          mkdir -p "$SEEDS_SECRETS_DIR"
+          python3 - <<'EOF'
+          import json, os
+          d = os.environ["SEEDS_SECRETS_DIR"]
+          w = lambda n, v: json.dump(v, open(f"{d}/{n}.json", "w"))
+          w("seeds-platform-secret", {
+            "APP_MODE": "all", "PORT": "4000", "SECRET_KEY": "ci-secret-key", "JWT_EXPIRES_IN": "1h",
+            "PASSWORD_SALT_ROUNDS": "10", "DB_CONNECTION": "mongodb://localhost:27017/x",
+            "REDIS_URL": "redis://localhost:6379", "BASE_URL": "http://localhost:4000",
+            "CORS_ALLOWED_ORIGINS": "*", "ENV": "development",
+            "WEBSOCKET_SERVICE_URL": "ws://localhost:3000"})
+          w("seeds-websocket-secret", {"PORT": "3000"})
+          w("seeds-content-webapp-secret", {"REACT_APP_API_BASE_URL": "http://localhost:4000"})
+          w("seeds-teacher-webapp-secret", {"REACT_APP_API_BASE_URL": "http://localhost:4000"})
+          EOF
+      - name: Build platform image from the SEEDS branch
+        run: |
+          S=$(date +%s)
+          docker build -t seeds-platform:ci seeds-src/platform
+          echo "image build: $(( $(date +%s)-S ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Kind cluster, empty Mongo, load image
+        working-directory: seeds-kind-repro
+        run: |
+          S=$(date +%s)
+          ./bootstrap.sh up
+          ./bootstrap.sh mongo
+          ./bootstrap.sh rewire-mongo
+          ./bootstrap.sh load platform seeds-platform:ci
+          echo "kind up and deploy: $(( $(date +%s)-S ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: e2e checks
+        working-directory: seeds-kind-repro
+        run: ./e2e374.sh pr | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Pod state on failure
+        if: failure()
+        working-directory: seeds-kind-repro
+        run: |
+          export KUBECONFIG="$PWD/.kube/seeds-kind.kubeconfig"
+          kubectl -n seeds get pods
+          kubectl -n seeds logs deploy/seeds-platform --tail=60
