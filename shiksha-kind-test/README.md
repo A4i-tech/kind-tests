@@ -25,6 +25,13 @@ has uncommitted changes.
 SHIKSHA_BRANCH=fix/shiksha-fe-runtime-env-574 ./run.sh all
 ```
 
+## CI mode
+
+Set `SHIKSHA_BE_IMAGE`, `SHIKSHA_API_IMAGE` and `SHIKSHA_FE_IMAGE` to local docker
+image names. `deploy` loads them into kind and deploys them instead of the registry
+`:staging` images. Set `SKIP_MONGO_RESTORE=1` to start an empty mongo and seed it
+yourself, with no dump zip.
+
 ## Full run
 
 ```

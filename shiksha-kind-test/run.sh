@@ -32,6 +32,9 @@
 #
 # Env overrides: SHIKSHA_REPO_DIR, SHIKSHA_BRANCH, SHIKSHA_SECRETS_DIR,
 #                MONGO_DUMP_ZIP, MONGO_DB, TEST_PHONE, TEST_PIN
+# CI overrides:  SHIKSHA_BE_IMAGE, SHIKSHA_API_IMAGE, SHIKSHA_FE_IMAGE: local docker
+#                images to load into kind and deploy instead of the registry :staging
+#                ones. SKIP_MONGO_RESTORE=1: start an empty mongo, no dump needed.
 set -euo pipefail
 
 CLUSTER=shiksha-local
@@ -85,15 +88,20 @@ cmd_up() {
   kubectl config use-context "kind-$CLUSTER"
 }
 
-# strip kinds whose CRDs aren't in kind (ExternalSecret, Certificate) and
+# strip kinds whose CRDs aren't in kind (ExternalSecret, Certificate, ArgoCD Application) and
 # the fe Ingress (no controller here — port-forward instead)
 filter_manifests() {
   python3 - "$1" "$FILTERED" <<'PY'
-import sys, yaml
+import os, sys, yaml
 src, dst = sys.argv[1], sys.argv[2]
-skip = {"ExternalSecret", "Certificate", "Ingress"}
+skip = {"ExternalSecret", "Certificate", "Ingress", "Application", "ApplicationSet"}
+images = {"shiksha-be": os.environ.get("SHIKSHA_BE_IMAGE"), "shiksha-api": os.environ.get("SHIKSHA_API_IMAGE"), "shiksha-fe": os.environ.get("SHIKSHA_FE_IMAGE")}
 with open(src) as f:
     docs = [d for d in yaml.safe_load_all(f) if d and d.get("kind") not in skip]
+for d in docs:
+    if d["kind"] == "Deployment" and images.get(d["metadata"]["name"]):
+        c = d["spec"]["template"]["spec"]["containers"][0]
+        c["image"], c["imagePullPolicy"] = images[d["metadata"]["name"]], "IfNotPresent"
 with open(dst, "w") as f:
     yaml.safe_dump_all(docs, f)
 print(f"kept {len(docs)} resources -> {dst}")
@@ -118,6 +126,9 @@ cmd_deploy() {
   checkout_repo_branch
   kubectl kustomize "$SHIKSHA_REPO_DIR/partners/shiksha" > "$HERE/.shiksha-kind-raw.yaml"
   filter_manifests "$HERE/.shiksha-kind-raw.yaml"
+  for image in "${SHIKSHA_BE_IMAGE:-}" "${SHIKSHA_API_IMAGE:-}" "${SHIKSHA_FE_IMAGE:-}"; do
+    [ -z "$image" ] || kind load docker-image "$image" --name "$CLUSTER"
+  done
   kubectl apply -f "$FILTERED"
   echo "waiting for rollouts (be/api may crashloop until 'mongo'+'rewire-mongo' have run)..."
   kubectl -n "$NS" rollout status deploy/shiksha-fe --timeout=120s || true
@@ -160,9 +171,11 @@ cmd_secrets() {
 # LimitRange in the namespace defaults containers to 512Mi — too little for
 # mongod+mongorestore together, so this pod gets an explicit 2Gi override.
 cmd_mongo() {
-  need unzip
   assert_kind_context
-  [ -f "$MONGO_DUMP_ZIP" ] || { echo "dump zip not found: $MONGO_DUMP_ZIP" >&2; exit 1; }
+  if [ "${SKIP_MONGO_RESTORE:-}" != 1 ]; then
+    need unzip
+    [ -f "$MONGO_DUMP_ZIP" ] || { echo "dump zip not found: $MONGO_DUMP_ZIP" >&2; exit 1; }
+  fi
   kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
   cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -196,6 +209,7 @@ spec:
   ports: [{port: 27017, targetPort: 27017}]
 EOF
   kubectl -n "$NS" rollout status deploy/shiksha-mongo --timeout=120s
+  [ "${SKIP_MONGO_RESTORE:-}" != 1 ] || return 0
 
   rm -rf "$HERE/.mongo-dump" && mkdir -p "$HERE/.mongo-dump"
   # unzip exits 1 for harmless warnings (e.g. backslash path separators) even
