@@ -18,7 +18,6 @@ jobs:
     timeout-minutes: 25
     env:
       SEEDS_REF: ${{ inputs.seeds_ref || 'farman/739-website-fetch-audit-logs-bcrypt' }}
-      SEEDS_SECRETS_DIR: ${{ runner.temp }}/seeds-secrets
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -28,6 +27,8 @@ jobs:
           path: seeds-src
       - name: Synthetic secrets
         run: |
+          echo "SEEDS_SECRETS_DIR=$RUNNER_TEMP/seeds-secrets" >> "$GITHUB_ENV"
+          export SEEDS_SECRETS_DIR="$RUNNER_TEMP/seeds-secrets"
           mkdir -p "$SEEDS_SECRETS_DIR"
           python3 - <<'EOF'
           import json, os
