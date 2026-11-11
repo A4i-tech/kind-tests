@@ -13,7 +13,8 @@ S0=$(date +%s)
 kubectl -n seeds port-forward svc/seeds-platform-svc $PORT:4000 >/dev/null 2>&1 &
 PF=$!
 trap 'kill $PF 2>/dev/null' EXIT
-for _ in $(seq 1 30); do curl -sf --max-time 2 "$B/health" >/dev/null && break; sleep 1; done
+for _ in $(seq 1 120); do curl -sf --max-time 2 "$B/health" >/dev/null && break; sleep 1; done
+curl -sf --max-time 2 "$B/health" >/dev/null || { echo "FAIL platform not healthy after 120s"; exit 1; }
 
 chk() { # name expected actual
   if [ "$MODE" = base ]; then echo "[base] $1 -> $3"; return; fi
