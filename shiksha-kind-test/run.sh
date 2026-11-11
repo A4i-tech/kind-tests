@@ -20,6 +20,7 @@
 #   up           create kind cluster (idempotent, auto-installs kind)
 #   secrets      clone be/api/fe secrets from local JSON files -> k8s Secrets
 #   mongo        deploy standalone mongo + restore dump into it
+#   azurite      deploy the Azure blob emulator
 #   rewire-mongo point be's MONGO_URL at the local mongo, restart be
 #   deploy       git checkout SHIKSHA_BRANCH in SHIKSHA_REPO_DIR, build+filter kustomize output, apply
 #   forward      port-forward shiksha-fe-svc:80 -> localhost:8000 (foreground)
@@ -194,6 +195,7 @@ spec:
       containers:
         - name: mongo
           image: mongo:6
+          args: ["--replSet", "rs0", "--bind_ip_all"]
           ports: [{containerPort: 27017}]
           resources:
             requests: {cpu: 100m, memory: 256Mi}
@@ -209,6 +211,8 @@ spec:
   ports: [{port: 27017, targetPort: 27017}]
 EOF
   kubectl -n "$NS" rollout status deploy/shiksha-mongo --timeout=120s
+  # Single-node replica set: the app uses multi-document transactions, which standalone mongod rejects.
+  kubectl -n "$NS" exec deploy/shiksha-mongo -- mongosh --quiet --eval     "rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'shiksha-mongo.$NS.svc.cluster.local:27017'}]}); while (!db.hello().isWritablePrimary) sleep(500)"
   [ "${SKIP_MONGO_RESTORE:-}" != 1 ] || return 0
 
   rm -rf "$HERE/.mongo-dump" && mkdir -p "$HERE/.mongo-dump"
@@ -223,9 +227,46 @@ EOF
   kubectl -n "$NS" exec "$pod" -- mongorestore --db "$MONGO_DB" --dir /tmp/dump --drop --numInsertionWorkersPerCollection=1
 }
 
+# Azure blob emulator, so upload paths work with no live storage account. Point
+# AZURE_STORAGE_CONNECTION_STRING at BlobEndpoint=http://azurite.$NS.svc.cluster.local:10000/devstoreaccount1
+cmd_azurite() {
+  assert_kind_context
+  cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: azurite
+  namespace: $NS
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: azurite}
+  template:
+    metadata:
+      labels: {app: azurite}
+    spec:
+      containers:
+        - name: azurite
+          image: mcr.microsoft.com/azure-storage/azurite:3.33.0
+          args: ["azurite-blob", "--blobHost", "0.0.0.0", "--skipApiVersionCheck", "--disableProductStyleUrl"]
+          ports: [{containerPort: 10000}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: azurite, namespace: $NS}
+spec:
+  selector: {app: azurite}
+  ports: [{port: 10000, targetPort: 10000}]
+EOF
+  kubectl -n "$NS" rollout status deploy/azurite --timeout=120s
+}
+
 cmd_rewire_mongo() {
   assert_kind_context
-  local url="mongodb://shiksha-mongo.$NS.svc.cluster.local:27017/$MONGO_DB"
+  local url="mongodb://shiksha-mongo.$NS.svc.cluster.local:27017/$MONGO_DB?replicaSet=rs0"
   kubectl -n "$NS" get secret shiksha-be-secret -o json | python3 -c "
 import json, sys, base64
 d = json.load(sys.stdin)
@@ -298,6 +339,7 @@ case "${1:-}" in
   up) cmd_up ;;
   secrets) cmd_secrets ;;
   mongo) cmd_mongo ;;
+  azurite) cmd_azurite ;;
   rewire-mongo) cmd_rewire_mongo ;;
   deploy) cmd_deploy ;;
   forward) cmd_forward ;;
@@ -306,6 +348,6 @@ case "${1:-}" in
   status) cmd_status ;;
   kubectl) shift; cmd_kubectl "$@" ;;
   down) cmd_down ;;
-  all) cmd_up; cmd_secrets; cmd_mongo; cmd_deploy; cmd_rewire_mongo; cmd_status ;;
-  *) echo "usage: $0 {up|secrets|mongo|rewire-mongo|deploy|forward|test|login-test|status|kubectl|down|all}"; exit 1 ;;
+  all) cmd_up; cmd_secrets; cmd_mongo; cmd_azurite; cmd_deploy; cmd_rewire_mongo; cmd_status ;;
+  *) echo "usage: $0 {up|secrets|mongo|azurite|rewire-mongo|deploy|forward|test|login-test|status|kubectl|down|all}"; exit 1 ;;
 esac
