@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   e2e:
     runs-on: ubuntu-latest
@@ -61,10 +65,10 @@ jobs:
       - name: e2e checks
         working-directory: seeds-kind-repro
         run: ./e2e374.sh pr | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Pod state on failure
-        if: failure()
+      - name: Pod state and platform logs
+        if: always()
         working-directory: seeds-kind-repro
         run: |
           export KUBECONFIG="$PWD/.kube/seeds-kind.kubeconfig"
           kubectl -n seeds get pods
-          kubectl -n seeds logs deploy/seeds-platform --tail=60
+          kubectl -n seeds logs deploy/seeds-platform --tail=80
