@@ -30,24 +30,37 @@ jobs:
           ref: ${{ env.SEEDS_REF }}
           path: seeds-src
       - name: Synthetic secrets
+        env:
+          MOCK_SECRET_KEY: ${{ vars.MOCK_SECRET_KEY }}
+          MOCK_AZURE_STORAGE_ACCOUNT_NAME: ${{ vars.MOCK_AZURE_STORAGE_ACCOUNT_NAME }}
+          MOCK_AZURE_STORAGE_ACCOUNT_KEY: ${{ vars.MOCK_AZURE_STORAGE_ACCOUNT_KEY }}
+          MOCK_AZURE_SERVICE_BUS_CONNECTION_STRING: ${{ vars.MOCK_AZURE_SERVICE_BUS_CONNECTION_STRING }}
+          MOCK_AZURE_TRANSLATION_KEY: ${{ vars.MOCK_AZURE_TRANSLATION_KEY }}
+          MOCK_AZURE_TRANSLATION_REGION: ${{ vars.MOCK_AZURE_TRANSLATION_REGION }}
+          MOCK_TTS_REGION: ${{ vars.MOCK_TTS_REGION }}
+          MOCK_TTS_SUBSCRIPTION_KEY: ${{ vars.MOCK_TTS_SUBSCRIPTION_KEY }}
         run: |
           echo "SEEDS_SECRETS_DIR=$RUNNER_TEMP/seeds-secrets" >> "$GITHUB_ENV"
           export SEEDS_SECRETS_DIR="$RUNNER_TEMP/seeds-secrets"
           mkdir -p "$SEEDS_SECRETS_DIR"
+          echo "::notice title=Mock credentials::All secrets in this run come from MOCK_* repo variables. They are mock values, not real credentials."
+          echo "MOCK values only, not real credentials: $(env | grep -o '^MOCK_[A-Z_]*' | sort | tr '\n' ' ')" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 - <<'EOF'
           import json, os
-          d = os.environ["SEEDS_SECRETS_DIR"]
+          e = os.environ
+          d = e["SEEDS_SECRETS_DIR"]
           w = lambda n, v: json.dump(v, open(f"{d}/{n}.json", "w"))
           w("seeds-platform-secret", {
-            "APP_MODE": "api", "PORT": "4000", "SECRET_KEY": "ci-secret-key", "JWT_EXPIRES_IN": "1h",
+            "APP_MODE": "api", "PORT": "4000", "SECRET_KEY": e["MOCK_SECRET_KEY"], "JWT_EXPIRES_IN": "1h",
             "PASSWORD_SALT_ROUNDS": "10", "DB_CONNECTION": "mongodb://localhost:27017/x",
             "REDIS_URL": "redis://localhost:6379", "BASE_URL": "http://localhost:4000",
             "CORS_ALLOWED_ORIGINS": "*", "ENV": "development",
             "WEBSOCKET_SERVICE_URL": "ws://localhost:3000",
-            "AZURE_SERVICE_BUS_CONNECTION_STRING": "Endpoint=sb://ci.invalid/;SharedAccessKeyName=x;SharedAccessKey=eA==",
-            "TRANSLATION_PROVIDER": "azure", "AZURE_TRANSLATION_KEY": "ci", "AZURE_TRANSLATION_REGION": "ci",
-            "TTS_REGION": "ci", "TTS_SUBSCRIPTION_KEY": "ci"})
-          w("seeds-websocket-secret", {"PORT": "3000"})
+            "AZURE_SERVICE_BUS_CONNECTION_STRING": e["MOCK_AZURE_SERVICE_BUS_CONNECTION_STRING"],
+            "TRANSLATION_PROVIDER": "azure", "AZURE_TRANSLATION_KEY": e["MOCK_AZURE_TRANSLATION_KEY"],
+            "AZURE_TRANSLATION_REGION": e["MOCK_AZURE_TRANSLATION_REGION"],
+            "TTS_REGION": e["MOCK_TTS_REGION"], "TTS_SUBSCRIPTION_KEY": e["MOCK_TTS_SUBSCRIPTION_KEY"]})
+          w("seeds-websocket-secret", {"PORT": "3000", "AZURE_STORAGE_ACCOUNT_NAME": e["MOCK_AZURE_STORAGE_ACCOUNT_NAME"], "AZURE_STORAGE_ACCOUNT_KEY": e["MOCK_AZURE_STORAGE_ACCOUNT_KEY"]})
           w("seeds-content-webapp-secret", {"REACT_APP_API_BASE_URL": "http://localhost:4000"})
           w("seeds-teacher-webapp-secret", {"REACT_APP_API_BASE_URL": "http://localhost:4000"})
           EOF

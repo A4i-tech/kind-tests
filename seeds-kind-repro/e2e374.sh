@@ -10,10 +10,13 @@ B="http://127.0.0.1:$PORT"
 fails=0
 S0=$(date +%s)
 
-kubectl -n seeds port-forward svc/seeds-platform-svc $PORT:4000 >/dev/null 2>&1 &
-PF=$!
-trap 'kill $PF 2>/dev/null' EXIT
-for _ in $(seq 1 120); do curl -sf --max-time 2 "$B/health" >/dev/null && break; sleep 1; done
+PF=0
+trap '[ "$PF" -gt 0 ] && kill "$PF" 2>/dev/null; true' EXIT
+for i in $(seq 1 120); do
+  curl -sf --max-time 2 "$B/health" >/dev/null && break
+  if [ $((i % 5)) -eq 1 ]; then [ "$PF" -gt 0 ] && kill "$PF" 2>/dev/null; kubectl -n seeds port-forward svc/seeds-platform-svc $PORT:4000 >/dev/null 2>&1 & PF=$!; fi
+  sleep 1
+done
 curl -sf --max-time 2 "$B/health" >/dev/null || { echo "FAIL platform not healthy after 120s"; exit 1; }
 
 chk() { # name expected actual
