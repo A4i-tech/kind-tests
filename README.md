@@ -9,6 +9,7 @@ cluster.
 | [`umami-shiksha/`](umami-shiksha/) | apps/umami + partners/shiksha-fe together (umami tracking wired into shiksha-fe) |
 | [`shiksha-kind-test/`](shiksha-kind-test/) | partners/shiksha (api/be/fe) in isolation, full login flow against a local Mongo |
 | [`seeds-kind-repro/`](seeds-kind-repro/) | partners/seeds, all 4 components, against real staging-shaped config |
+| [`argocd-drift/`](argocd-drift/) | ArgoCD OutOfSync drift that re-syncs apps and fires notifications, and the server-side diff fix |
 
 ## Prerequisites
 
