@@ -9,6 +9,7 @@ cluster.
 | [`umami-shiksha/`](umami-shiksha/) | apps/umami + partners/shiksha-fe together (umami tracking wired into shiksha-fe) |
 | [`shiksha-kind-test/`](shiksha-kind-test/) | partners/shiksha (api/be/fe) in isolation, full login flow against a local Mongo |
 | [`seeds-kind-repro/`](seeds-kind-repro/) | partners/seeds, all 4 components, against real staging-shaped config |
+| [`notify-all/`](notify-all/) | ArgoCD Notifications for every app: subscription selector and the partners label default |
 
 ## Prerequisites
 
