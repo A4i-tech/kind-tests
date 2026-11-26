@@ -21,6 +21,7 @@
 #   secrets      clone be/api/fe secrets from local JSON files -> k8s Secrets
 #   mongo        deploy standalone mongo + restore dump into it
 #   azurite      deploy the Azure blob emulator
+#   nats         deploy a JetStream NATS server for the presentation queue
 #   rewire-mongo point be's MONGO_URL at the local mongo, restart be
 #   deploy       git checkout SHIKSHA_BRANCH in SHIKSHA_REPO_DIR, build+filter kustomize output, apply
 #   forward      port-forward shiksha-fe-svc:80 -> localhost:8000 (foreground)
@@ -103,6 +104,11 @@ for d in docs:
     if d["kind"] == "Deployment" and images.get(d["metadata"]["name"]):
         c = d["spec"]["template"]["spec"]["containers"][0]
         c["image"], c["imagePullPolicy"] = images[d["metadata"]["name"]], "IfNotPresent"
+for d in docs:
+    # the kind NATS has no auth, and the creds file comes from an ExternalSecret that kind lacks
+    if d["kind"] == "Deployment":
+        for c in d["spec"]["template"]["spec"]["containers"]:
+            c["env"] = [e for e in c.get("env", []) if e["name"] != "NATS_CREDS"]
 with open(dst, "w") as f:
     yaml.safe_dump_all(docs, f)
 print(f"kept {len(docs)} resources -> {dst}")
@@ -327,6 +333,42 @@ cmd_status() {
 # script's isolated kubeconfig and refuse if that kubeconfig's context
 # somehow isn't the kind sandbox.
 #   ./run.sh kubectl -n shiksha get pods
+# JetStream NATS for the presentation queue (api publishes, worker consumes). No auth, so no creds file.
+cmd_nats() {
+  assert_kind_context
+  cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: $NS
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: nats}
+  template:
+    metadata:
+      labels: {app: nats}
+    spec:
+      containers:
+        - name: nats
+          image: nats:2.12-alpine
+          args: ["-js"]
+          ports: [{containerPort: 4222}]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: nats, namespace: $NS}
+spec:
+  selector: {app: nats}
+  ports: [{port: 4222, targetPort: 4222}]
+EOF
+  kubectl -n "$NS" rollout status deploy/nats --timeout=120s
+}
+
 cmd_kubectl() {
   assert_kind_context
   kubectl "$@"
@@ -342,6 +384,7 @@ case "${1:-}" in
   secrets) cmd_secrets ;;
   mongo) cmd_mongo ;;
   azurite) cmd_azurite ;;
+  nats) cmd_nats ;;
   rewire-mongo) cmd_rewire_mongo ;;
   deploy) cmd_deploy ;;
   forward) cmd_forward ;;
@@ -350,6 +393,6 @@ case "${1:-}" in
   status) cmd_status ;;
   kubectl) shift; cmd_kubectl "$@" ;;
   down) cmd_down ;;
-  all) cmd_up; cmd_secrets; cmd_mongo; cmd_azurite; cmd_deploy; cmd_rewire_mongo; cmd_status ;;
-  *) echo "usage: $0 {up|secrets|mongo|azurite|rewire-mongo|deploy|forward|test|login-test|status|kubectl|down|all}"; exit 1 ;;
+  all) cmd_up; cmd_secrets; cmd_mongo; cmd_azurite; cmd_nats; cmd_deploy; cmd_rewire_mongo; cmd_status ;;
+  *) echo "usage: $0 {up|secrets|mongo|azurite|nats|rewire-mongo|deploy|forward|test|login-test|status|kubectl|down|all}"; exit 1 ;;
 esac
