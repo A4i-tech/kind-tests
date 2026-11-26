@@ -211,6 +211,8 @@ spec:
   ports: [{port: 27017, targetPort: 27017}]
 EOF
   kubectl -n "$NS" rollout status deploy/shiksha-mongo --timeout=120s
+  # The pod is Running before mongod listens, so wait for it.
+  until kubectl -n "$NS" exec deploy/shiksha-mongo -- mongosh --quiet --eval 'db.hello().ok' >/dev/null 2>&1; do sleep 2; done
   # Single-node replica set: the app uses multi-document transactions, which standalone mongod rejects.
   kubectl -n "$NS" exec deploy/shiksha-mongo -- mongosh --quiet --eval     "rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'shiksha-mongo.$NS.svc.cluster.local:27017'}]}); while (!db.hello().isWritablePrimary) sleep(500)"
   [ "${SKIP_MONGO_RESTORE:-}" != 1 ] || return 0
