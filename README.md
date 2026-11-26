@@ -9,6 +9,7 @@ cluster.
 | [`umami-shiksha/`](umami-shiksha/) | apps/umami + partners/shiksha-fe together (umami tracking wired into shiksha-fe) |
 | [`shiksha-kind-test/`](shiksha-kind-test/) | partners/shiksha (api/be/fe) in isolation, full login flow against a local Mongo |
 | [`seeds-kind-repro/`](seeds-kind-repro/) | partners/seeds, all 4 components, against real staging-shaped config |
+| [`cilium-netpol/`](cilium-netpol/) | every infra-ops NetworkPolicy enforced by Cilium, 99-check allow/deny matrix (A4i-tech/.github#740) |
 
 ## Prerequisites
 
